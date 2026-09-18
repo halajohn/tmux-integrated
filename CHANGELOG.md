@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-18
+
+### Changed
+
+- Revert "fix: strip OSC 10/11 color query responses from pane output"
+- Strip OSC 10/11 color query responses from pane output
+- Keep tmux windows alive unless the user closed the tab
+- Document tab-name model and showAutomaticRename in README and architecture
+- Unit, integration, and real-tmux e2e coverage for tab rename sync
+- Opt-in showAutomaticRename tab titles and robust bidirectional rename sync (#40)
+- Document node-pty loading strategy and multi-root start-directory pick in ARCHITECTURE
+- Reuse already-materialized node-pty shim when the copy fails
+- Materialize node-pty shim in global storage and prefer zero-copy loading
+- Load node-pty from node_modules.asar on VS Code 1.129+
+- Respect selected workspace for new terminals
+- Support VS Code 1.129 node-pty packaging
+
 ## [0.2.0] - 2026-05-29
 
 ### Changed
