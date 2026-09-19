@@ -503,12 +503,23 @@ export class TmuxControlClient extends EventEmitter {
      * iTerm2 similarly relies on `refresh-client -C` for sizing without
      * resizing the control channel PTY to match each pane.
      */
-    async resizeWindowForClient(cols: number, rows: number): Promise<void> {
-        // refresh-client -C sets the control-mode client size.  Available
-        // since tmux 2.1; tolerates errors on truly ancient builds.
+    async resizeWindowForClient(
+        windowId: string,
+        cols: number,
+        rows: number,
+    ): Promise<void> {
+        if (
+            !/^@\d+$/.test(windowId) ||
+            !Number.isInteger(cols) ||
+            !Number.isInteger(rows) ||
+            cols < 1 ||
+            rows < 1
+        ) {
+            throw new Error("Invalid tmux window ID or terminal dimensions");
+        }
+      
         await this.sendCommand(
-            `refresh-client -C ${cols},${rows}`,
-            CommandFlags.TolerateErrors,
+            `refresh-client -C ${windowId}:${cols}x${rows}`,
         );
     }
 

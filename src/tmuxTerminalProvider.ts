@@ -544,6 +544,7 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
 
             if (initialDimensions && this.windowId) {
                 await this.client.resizeWindowForClient(
+                    this.windowId,
                     initialDimensions.columns,
                     initialDimensions.rows,
                 ).catch((err) => this.log(`resize warning (non-fatal): ${err}`));
@@ -606,9 +607,11 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
             this.resizeTimer = setTimeout(() => {
                 this.resizeTimer = null;
                 this.log(`setDimensions: ${dimensions.columns}x${dimensions.rows} for window ${this.windowId}`);
-                this.client
-                    .resizeWindowForClient(dimensions.columns, dimensions.rows)
-                    .catch((err) => this.log(`resize error: ${err}`));
+                if (this.windowId) {
+                    this.client
+                        .resizeWindowForClient(this.windowId, dimensions.columns, dimensions.rows)
+                        .catch((err) => this.log(`resize error: ${err}`));
+                }
             }, 100);
         }
     }
