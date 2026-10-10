@@ -228,6 +228,110 @@ test('adoption: fixed window names are shown and the creation name never syncs b
   assert.equal(client.name, 'mywin');
 });
 
+test('adoption: the tab title is emitted before any tmux round-trip (issue #42)', async () => {
+  const client = new FakeTmuxClient({ name: 'mywin' });
+  // Every command hangs, standing in for a slow or wedged control channel.
+  client.sendCommand = () => new Promise(() => {});
+  const { pty, titles } = makeTerminal(client, {
+    existingWindow: {
+      windowId: '@3',
+      paneId: '%4',
+      windowIndex: 3,
+      name: 'mywin',
+      automaticRename: false,
+    },
+  });
+
+  pty.open(undefined);
+  await tick();
+
+  assert.deepEqual(titles, ['mywin'], 'title must not wait on set-option/getWindowName');
+});
+
+test('reassertTitle re-sends the title the workbench discarded (issue #42)', async () => {
+  const client = new FakeTmuxClient({ name: 'mywin' });
+  const { pty, titles } = makeTerminal(client, {
+    existingWindow: {
+      windowId: '@3',
+      paneId: '%4',
+      windowIndex: 3,
+      name: 'mywin',
+      automaticRename: false,
+    },
+  });
+  // The tab reverted to the creation-options name after onProcessReady.
+  pty.setTerminalNameProvider(() => 'tmux:3');
+
+  await pty.open(undefined);
+  assert.deepEqual(titles, ['mywin']);
+
+  // Called from extension.ts once terminal.processId resolves; must bypass
+  // the emitTitle dedupe even though the title has not changed.
+  pty.reassertTitle();
+  assert.deepEqual(titles, ['mywin', 'mywin']);
+});
+
+test('reassertTitle is a no-op once the tab shows the right name', async () => {
+  const client = new FakeTmuxClient({ name: 'mywin' });
+  const { pty, titles } = makeTerminal(client, {
+    existingWindow: {
+      windowId: '@3',
+      paneId: '%4',
+      windowIndex: 3,
+      name: 'mywin',
+      automaticRename: false,
+    },
+  });
+  pty.setTerminalNameProvider(() => 'mywin');
+
+  await pty.open(undefined);
+  pty.reassertTitle();
+
+  assert.deepEqual(titles, ['mywin']);
+});
+
+test('a tab that VS Code left on the creation name is re-titled (issue #42)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const client = new FakeTmuxClient({ name: 'mywin' });
+  const { pty, titles } = makeTerminal(client, {
+    existingWindow: {
+      windowId: '@3',
+      paneId: '%4',
+      windowIndex: 3,
+      name: 'mywin',
+      automaticRename: false,
+    },
+  });
+  // VS Code drops the title: the tab keeps the creation-options name.
+  pty.setTerminalNameProvider(() => 'tmux:3');
+
+  await pty.open(undefined);
+  assert.deepEqual(titles, ['mywin']);
+
+  t.mock.timers.tick(5000);
+  assert.deepEqual(titles, ['mywin', 'mywin', 'mywin'], 'title re-fired while the tab lags');
+});
+
+test('title verification leaves a user rename alone', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const client = new FakeTmuxClient({ name: 'mywin' });
+  const { pty, titles } = makeTerminal(client, {
+    existingWindow: {
+      windowId: '@3',
+      paneId: '%4',
+      windowIndex: 3,
+      name: 'mywin',
+      automaticRename: false,
+    },
+  });
+  pty.setTerminalNameProvider(() => 'renamed-by-user');
+
+  await pty.open(undefined);
+  t.mock.timers.tick(5000);
+
+  assert.deepEqual(titles, ['mywin'], 'a name we never emitted must not be overwritten');
+});
+
 test('rapid successive renames do not flicker through stale echoes', async () => {
   const client = new FakeTmuxClient();
   const { pty, titles } = makeTerminal(client);

@@ -156,6 +156,24 @@ function describeTerminalExitReason(reason: vscode.TerminalExitReason | undefine
     }
 }
 
+/**
+ * Delays after a title emission at which the VS Code tab label is re-checked.
+ *
+ * A title emitted from a `Pseudoterminal` can be silently thrown away:
+ * `TerminalInstance`'s `onProcessReady` handler re-applies the
+ * creation-options `name` as a static title one microtask after the process
+ * reports ready, with no regard for a title the pty has already supplied.
+ * Whether ours lands before or after that decides whether the tab keeps it or
+ * reverts to `tmux:<n>` for the rest of the session — the race behind issue
+ * #42, which Remote SSH latency tips towards losing. Nothing acknowledges a
+ * title, so re-firing is the only recovery available from inside an extension.
+ *
+ * `reassertTitle()` covers that clobber directly; these timers are the
+ * backstop for later renames and for terminals whose process id never
+ * resolves.
+ */
+const TITLE_VERIFY_DELAYS_MS = [750, 2500];
+
 export class TmuxTerminal implements vscode.Pseudoterminal {
     private readonly writeEmitter = new vscode.EventEmitter<string>();
     private readonly closeEmitter = new vscode.EventEmitter<number | void>();
@@ -211,6 +229,14 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
      * "Rename…" to tmux.  No VS Code API registers this; it is optional wiring.
      */
     private onInputCallback: (() => void) | null = null;
+    /**
+     * Reads the tab label VS Code currently shows for this terminal, wired up
+     * from `extension.ts` alongside `onInputCallback`. Used by the title
+     * verification pass; unset in unit tests and before the terminal has been
+     * tracked, in which case verification is skipped.
+     */
+    private terminalNameProvider: (() => string | undefined) | null = null;
+    private readonly titleVerifyTimers: ReturnType<typeof setTimeout>[] = [];
     /**
      * Becomes true only after open() has settled the initial tab title
      * (queried/disabled automatic-rename, emitted the chosen label, and —
@@ -350,6 +376,34 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
         this.onInputCallback = cb;
     }
 
+    /** See `terminalNameProvider` field.  Called from the same wiring as `setOnInputCallback`. */
+    setTerminalNameProvider(provider: () => string | undefined): void {
+        this.terminalNameProvider = provider;
+    }
+
+    /**
+     * Re-send the current title to VS Code, bypassing the `emitTitle` dedupe.
+     *
+     * Call once the terminal's process id has resolved: that round-trip only
+     * completes after the renderer's `onProcessReady` handler has re-applied
+     * the creation-options name (see TITLE_VERIFY_DELAYS_MS), so a title
+     * fired here is the one that sticks. Only a tab still showing an older
+     * title of ours is corrected: a name this terminal never emitted is a user
+     * rename, and without a name provider there is nothing to compare against.
+     */
+    reassertTitle(): void {
+        const expected = this.titleSync.lastEmittedTitle;
+        const displayed = this.terminalNameProvider?.();
+        if (!expected || displayed === undefined) {
+            return;
+        }
+        if (this.titleSync.classifyTerminalName(displayed) !== 'settling') {
+            return;
+        }
+        this.log(`re-emitting tab title ${JSON.stringify(expected)} (tab shows ${JSON.stringify(displayed)})`);
+        this.nameEmitter.fire(expected);
+    }
+
     // -----------------------------------------------------------------------
     // Pseudoterminal interface
     // -----------------------------------------------------------------------
@@ -399,6 +453,21 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
             this.paneId = paneId;
             this.lifecycleHooks.onWindowAttached?.(windowId);
             this.attachedWindowNotified = true;
+
+            // Show the tab label before the first tmux round-trip. When a
+            // window is adopted its name already came through with the
+            // list-windows metadata, so waiting for the commands below only
+            // widens the window in which VS Code can lose the title (see
+            // TITLE_VERIFY_DELAYS_MS) and leave the tab reading `tmux:<n>`.
+            const knownName = (this.existingWindow?.name ?? targetWindow.name ?? '').trim();
+            if (knownName) {
+                this.emitTitle(pickTerminalTabTitle(
+                    knownName,
+                    windowIndex,
+                    this.existingWindow?.automaticRename ?? targetWindow.automaticRename,
+                    this.showAutomaticRename,
+                ));
+            }
 
             // Register event listeners BEFORE any async operations so that
             // notifications arriving during awaits are not lost.
@@ -904,6 +973,23 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
         }
         this.titleSync.recordEmission(normalized);
         this.nameEmitter.fire(normalized);
+        this.scheduleTitleVerification();
+    }
+
+    /** See TITLE_VERIFY_DELAYS_MS.  Re-armed by every emission; only the latest title matters. */
+    private scheduleTitleVerification(): void {
+        this.clearTitleVerification();
+        for (const delay of TITLE_VERIFY_DELAYS_MS) {
+            const timer = setTimeout(() => this.reassertTitle(), delay);
+            timer.unref?.();
+            this.titleVerifyTimers.push(timer);
+        }
+    }
+
+    private clearTitleVerification(): void {
+        for (const timer of this.titleVerifyTimers.splice(0)) {
+            clearTimeout(timer);
+        }
     }
 
     /**
@@ -933,6 +1019,7 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
             clearTimeout(this.resizeTimer);
             this.resizeTimer = null;
         }
+        this.clearTitleVerification();
         if (this.outputListener) {
             this.client.removeListener('output', this.outputListener);
             this.outputListener = null;

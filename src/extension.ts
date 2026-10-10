@@ -190,7 +190,18 @@ function registerTerminalRenameSync(context: vscode.ExtensionContext): void {
             return null;
         }
 
+        const firstSighting = !terminalPtyByTerminal.has(terminal);
         terminalPtyByTerminal.set(terminal, pty);
+        if (firstSighting) {
+            // The workbench re-applies the creation-options name ("tmux:<n>")
+            // when the terminal process reports ready, discarding whatever the
+            // pty emitted before that. processId only resolves after that has
+            // happened, so a title sent now is the one the tab keeps.
+            void terminal.processId.then(
+                () => pty!.reassertTitle(),
+                () => { /* terminal went away before it started */ },
+            );
+        }
         // Detect built-in "Rename…" the instant the user types in this
         // terminal. The pty classifies terminal.name itself so that stale
         // titles (VS Code applying our own rename asynchronously) are never
@@ -198,6 +209,9 @@ function registerTerminalRenameSync(context: vscode.ExtensionContext): void {
         pty.setOnInputCallback(() => {
             pty!.maybeSyncNameFromVsCode(terminal.name);
         });
+        // Lets the pty notice when VS Code has dropped a tab title it emitted
+        // and re-fire it (see TITLE_VERIFY_DELAYS_MS in tmuxTerminalProvider).
+        pty.setTerminalNameProvider(() => terminal.name);
         return pty;
     };
 

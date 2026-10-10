@@ -194,6 +194,7 @@ open(initialDimensions)
   |     * existingWindow if provided   (adoption path)
   |     * else: client.newWindow(...)  (creation path)
   |-- record windowId, paneId, tabWindowIndex
+  |-- emit the tab name straight away when it is already known (adoption path)
   |-- subscribe: 'output' / 'window-close' / 'window-renamed' / 'tmux-exit'
   |-- determine #{automatic-rename}, decide tab label (pickTerminalTabTitle)
   |-- unless showAutomaticRename: set-option -w automatic-rename off
@@ -273,6 +274,45 @@ All of the state behind this lives in one place per terminal:
    older name when the first echo arrives late.
 3. **Emissions are deduplicated** (`emitTitle`) so the bidirectional loop
    doesn't echo forever.
+
+### Why titles are re-asserted (issue #42)
+
+VS Code never acknowledges a `Pseudoterminal` title, and it will quietly throw
+one away. `ExtensionTerminalOptions.name` is mandatory, so `TerminalInstance`
+starts life with that name as a *static* title (`TitleEventSource.Api`, set in
+its constructor for custom ptys). Two consequences:
+
+1. The process-title path is dead for us: `_setTitle` returns early for
+   `TitleEventSource.Process` once the title source is `Api`. Only the
+   `instance.rename()` call in `$sendProcessProperty` can move the label.
+2. `TerminalInstance`'s `onProcessReady` handler re-applies
+   `_shellLaunchConfig.name` — unconditionally, one microtask after the
+   process reports ready, with no regard for a title the pty already sent.
+
+So the tab keeps our title only if it arrives *after* that handler runs. It is
+a pure ordering race, and Remote SSH latency tips it towards losing, which is
+why a varying handful of tabs stay on `tmux:<n>` after a reconnect while the
+rest are correct. A title fired synchronously from `open()` loses every time:
+`startSendingEvents` sends the title RPC before the process-ready one.
+
+Three mitigations:
+
+* **Emit before the first round-trip.** On the adoption path the window name
+  arrives with the `list-windows` metadata, so the title is emitted as soon as
+  the window id is known rather than after `set-option`/`display-message`.
+  This mainly guarantees the pty *has* a title to re-assert even if the
+  control channel stalls.
+* **Re-assert once the process id resolves** (`reassertTitle`, driven from
+  `registerTerminalRenameSync`). `terminal.processId` only resolves after a
+  round-trip that starts inside the `onProcessReady` handler, so by then the
+  clobber has already happened and our title is the one that sticks. This is
+  the load-bearing fix.
+* **Verify on a timer** (`TITLE_VERIFY_DELAYS_MS`) as a backstop for later
+  renames and for terminals whose process id never resolves.
+
+All three compare against the label VS Code reports (`terminal.name`, supplied
+by `setTerminalNameProvider`): only a `settling` classification is corrected,
+so a user rename is never overwritten.
 
 ## Protocol layer (`tmuxGateway.ts`)
 
@@ -367,6 +407,16 @@ laggy SSH tunnel.
 * `name` and `automaticRename` are now propagated all the way from
   `listWindows()` into `existingWindow`, so on reconnect we don't need a
   fresh round-trip just to find out what the window is called.
+
+### "Some tabs keep showing `tmux:<n>` after reconnecting"
+
+Reported in issue #42: after a Remote SSH reconnect to a session of ten
+named windows, a varying handful of tabs stay on the placeholder name while
+the rest show the tmux window name, and tmux's own names are always correct
+(so the label the extension computed was right — otherwise `open()` would
+have pushed the placeholder to tmux with `rename-window`). The title is
+therefore lost between `onDidChangeName` and the tab. See *Why titles are
+re-asserted* above for the VS Code-side mechanism and the mitigations.
 
 ### "My tmux-side rename gets undone when I type in the terminal"
 
