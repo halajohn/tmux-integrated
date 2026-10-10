@@ -82,6 +82,93 @@ Window** to reopen an existing tmux window in VS Code — the extension restores
 visible output and resumes live updates.  **tmux: New tmux Terminal** creates a
 fresh tmux window in the same session.
 
+### code and cursor after a reload
+
+On activate, the extension copies `VSCODE_IPC_HOOK_CLI` and the git askpass
+variables into the tmux session. A new pane inherits them. A shell that is
+already running keeps the values it started with, so `code` or `cursor` in
+that pane still talks to the previous window. The extension cannot rewrite
+that process's environment.
+
+Add the snippet below to the startup file that pane actually reads, then
+open a new pane once so the wrapper is defined. It stays in place across
+later reloads, and each `code` or `cursor` re-reads the session values
+before it runs.
+
+- **bash** — `~/.bashrc`. A login shell reads `~/.bash_profile`,
+  `~/.bash_login`, or `~/.profile` instead, unless that file sources
+  `~/.bashrc`.
+- **zsh** — `~/.zshrc`. Interactive login shells read it too.
+- **csh / tcsh** — `~/.tcshrc` if you have one, otherwise `~/.cshrc`.
+
+```bash
+_tmux_integrated_refresh_editor_env() {
+    local name line
+    for name in \
+        VSCODE_IPC_HOOK_CLI \
+        GIT_ASKPASS \
+        VSCODE_GIT_ASKPASS_NODE \
+        VSCODE_GIT_ASKPASS_MAIN \
+        VSCODE_GIT_ASKPASS_EXTRA_ARGS \
+        VSCODE_GIT_IPC_HANDLE
+    do
+        if line=$(tmux show-environment "$name" 2>/dev/null) &&
+            [[ "$line" == "$name="* ]]; then
+            export "${line?}"
+        fi
+    done
+}
+
+if [[ -n ${TMUX:-} && -n ${VSCODE_IPC_HOOK_CLI:-} ]]; then
+    code() {
+        _tmux_integrated_refresh_editor_env
+        command code "$@"
+    }
+    cursor() {
+        _tmux_integrated_refresh_editor_env
+        command cursor "$@"
+    }
+fi
+```
+
+If your bash login file does not already source `~/.bashrc`, add:
+
+```bash
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+```
+
+csh has no functions, so this loop builds one alias when the shell starts.
+`\code` and `\cursor` run the real command. Leave the `'"$_ti_n"'` splices
+as they are: that is how the variable name is inserted into the alias text.
+
+```csh
+if ( $?TMUX && $?VSCODE_IPC_HOOK_CLI ) then
+    set _ti_refresh = ""
+    foreach _ti_n ( \
+            VSCODE_IPC_HOOK_CLI \
+            GIT_ASKPASS \
+            VSCODE_GIT_ASKPASS_NODE \
+            VSCODE_GIT_ASKPASS_MAIN \
+            VSCODE_GIT_ASKPASS_EXTRA_ARGS \
+            VSCODE_GIT_IPC_HANDLE )
+        set _ti_piece = 'set _ti_w = (`tmux show-environment '"$_ti_n"' |& grep "^'"$_ti_n"'="`);'
+        set _ti_piece = $_ti_piece:q' if ($?_ti_w && $#_ti_w > 0) set _ti_j = "$_ti_w";'
+        set _ti_piece = $_ti_piece:q' if ($?_ti_w && $#_ti_w > 0) set _ti_v = "$_ti_j:s/'"$_ti_n"'=//";'
+        set _ti_piece = $_ti_piece:q' if ($?_ti_w && $#_ti_w > 0) setenv '"$_ti_n"' $_ti_v:q;'
+        set _ti_refresh = $_ti_refresh:q" $_ti_piece"
+    end
+    eval "alias _tmux_integrated_refresh_editor_env '$_ti_refresh:q'"
+    alias code '_tmux_integrated_refresh_editor_env; \code \!*'
+    alias cursor '_tmux_integrated_refresh_editor_env; \cursor \!*'
+    unset _ti_n _ti_piece _ti_refresh
+endif
+```
+
+Two editor windows attached to the same tmux session share that session
+environment. The window that activated last supplies these values.
+
 ### Troubleshooting default profile selection
 
 If your default terminal opens plain tmux instead of the extension (often with
@@ -226,8 +313,10 @@ after it is changed (existing tabs pick it up on the next window reload).
 The extension uses tmux's **control mode** (`-CC`) — the same approach used by
 [iTerm2](https://iterm2.com/).  In control mode tmux manages sessions and
 windows in the background while VS Code handles all rendering.  This means
-shell integration, Copilot, mouse support, and the `code` CLI all continue to
-work exactly as they do in a normal VS Code terminal.
+shell integration, Copilot, mouse support, and the `code` CLI continue to
+work as they do in a normal VS Code terminal. After a reload, an
+already-running pane needs the shell snippet under
+[code and cursor after a reload](#code-and-cursor-after-a-reload).
 
 ## Contributing
 
